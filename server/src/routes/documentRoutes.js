@@ -5,7 +5,7 @@ const { Pool } = require('pg');
 const authenticateToken = require('../middleware/authMiddleware');
 const Tesseract = require('tesseract.js');
 const fs = require('fs'); 
-const pdfParse = require('pdf-parse'); // The clean, standard import
+const pdfParse = require('pdf-parse');
 
 const pool = new Pool({
     user: process.env.DB_USER, host: process.env.DB_HOST, database: process.env.DB_NAME, password: process.env.DB_PASSWORD, port: process.env.DB_PORT,
@@ -38,12 +38,10 @@ const extractText = async (filePath, mimetype) => {
     }
 };
 
-// ... keep the rest of your router.post and router.get routes exactly the same below this ...
-
-// 1. POST: Upload document (Now handles PDF & Images)
+// 1. POST: Upload document (Includes metadata_tag support)
 router.post('/upload', authenticateToken, upload.single('document'), async (req, res) => {
     try {
-        const { title, workflow_id } = req.body;
+        const { title, workflow_id, metadata_tag } = req.body;
         const submitter_id = req.user.id;
 
         if (!title || !req.file) return res.status(400).json({ message: 'Title and document are required.' });
@@ -66,12 +64,11 @@ router.post('/upload', authenticateToken, upload.single('document'), async (req,
             }
         }
 
-        // NEW: Smart Text Extraction
         const extracted_text = await extractText(req.file.path, req.file.mimetype);
 
         const newDoc = await pool.query(
-            "INSERT INTO documents (title, file_path, extracted_text, submitter_id, workflow_id, current_node_id, current_assignee_id, status) VALUES ($1, $2, $3, $4, $5, $6, $7, 'Pending') RETURNING *",
-            [title, req.file.path, extracted_text, submitter_id, workflow_id || null, initialNodeId, initialAssigneeId]
+            "INSERT INTO documents (title, file_path, extracted_text, submitter_id, workflow_id, current_node_id, current_assignee_id, metadata_tag, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Pending') RETURNING *",
+            [title, req.file.path, extracted_text, submitter_id, workflow_id || null, initialNodeId, initialAssigneeId, metadata_tag || null]
         );
 
         res.status(201).json({ message: 'Document submitted', document: newDoc.rows[0] });
@@ -81,7 +78,7 @@ router.post('/upload', authenticateToken, upload.single('document'), async (req,
     }
 });
 
-// 2. PUT: Resubmit a rejected document (Now handles PDF & Images)
+// 2. PUT: Resubmit a rejected document
 router.put('/resubmit/:id', authenticateToken, upload.single('document'), async (req, res) => {
     try {
         const documentId = req.params.id;
@@ -109,7 +106,6 @@ router.put('/resubmit/:id', authenticateToken, upload.single('document'), async 
             }
         }
 
-        // NEW: Smart Text Extraction
         const extracted_text = await extractText(req.file.path, req.file.mimetype);
 
         await pool.query(
@@ -148,7 +144,7 @@ router.get('/', authenticateToken, async (req, res) => {
         if (req.user.role_id === 1) {
             query = "SELECT d.*, (SELECT comments FROM approvals a WHERE a.document_id = d.id ORDER BY id DESC LIMIT 1) as latest_comment FROM documents d WHERE d.submitter_id = $1 ORDER BY d.created_at DESC";
             values = [req.user.id];
-        } else if (req.user.role_id === 2) {
+        } else if (req.user.role_id === 2 || req.user.role_id > 3) { // Include custom reviewers!
             query = "SELECT * FROM documents WHERE status = 'Pending' AND (current_assignee_id = $1 OR current_assignee_id IS NULL) ORDER BY created_at ASC";
             values = [req.user.id];
         } else {

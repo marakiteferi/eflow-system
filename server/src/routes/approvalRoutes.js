@@ -68,6 +68,7 @@ router.post('/request-otp', authenticateToken, async (req, res) => {
 });
 
 // POST: Approve & Route Document
+// POST: Approve & Route Document (Advanced n8n-Style Engine)
 router.post('/approve', authenticateToken, async (req, res) => {
     const { documentId, otp, comments } = req.body;
     const storedData = otpStore.get(req.user.id);
@@ -83,8 +84,8 @@ router.post('/approve', authenticateToken, async (req, res) => {
     try {
         await pool.query('BEGIN');
 
-        // Fetch document info including submitter to email them later
-        const docQuery = await pool.query('SELECT title, submitter_id, workflow_id, current_node_id FROM documents WHERE id = $1', [documentId]);
+        // Fetch doc details AND the metadata_tag to evaluate conditions
+        const docQuery = await pool.query('SELECT title, submitter_id, workflow_id, current_node_id, metadata_tag FROM documents WHERE id = $1', [documentId]);
         const doc = docQuery.rows[0];
 
         let nextNodeId = null;
@@ -98,40 +99,73 @@ router.post('/approve', authenticateToken, async (req, res) => {
             const edges = flowData.edges || [];
             const nodes = flowData.nodes || [];
             
-            const nextEdge = edges.find(edge => edge.source === doc.current_node_id);
-            
-            if (nextEdge) {
-                nextNodeId = nextEdge.target;
-                const nextNode = nodes.find(n => n.id === nextNodeId);
-                if (nextNode) {
-                    nextAssigneeId = nextNode.data?.assignee ? parseInt(nextNode.data.assignee, 10) : null;
+            // AUTOMATED TRAVERSAL ENGINE
+            // Start looking for the next path from the node we just approved
+            let currentId = doc.current_node_id;
+
+            while (true) {
+                // 1. Get all edges leaving the current node
+                let outgoingEdges = edges.filter(e => e.source === currentId);
+                if (outgoingEdges.length === 0) break; // End of the line. Document is fully approved!
+
+                let edgeToFollow = outgoingEdges[0]; // Default for regular Task Nodes
+
+                // 2. Is the node we are AT a Condition Node?
+                const currentNodeObj = nodes.find(n => n.id === currentId);
+                
+                if (currentNodeObj && currentNodeObj.type === 'condition') {
+                    // Evaluate the Document Tag against the Node's rule
+                    const docTag = (doc.metadata_tag || '').toLowerCase().trim();
+                    const condValue = (currentNodeObj.data?.conditionValue || '').toLowerCase().trim();
+                    
+                    const isMatch = docTag === condValue;
+                    const expectedHandle = isMatch ? 'true' : 'false';
+
+                    // Find the specific edge that matches TRUE or FALSE
+                    edgeToFollow = outgoingEdges.find(e => e.sourceHandle === expectedHandle);
+                    
+                    if (!edgeToFollow) break; // If there is no line drawn for this outcome, workflow ends.
                 }
-                isFinalStep = false;
+
+                // 3. Find the Node that the chosen edge points to
+                let targetNode = nodes.find(n => n.id === edgeToFollow.target);
+                if (!targetNode) break;
+
+                // 4. Did we hit ANOTHER condition, or a real Task?
+                if (targetNode.type === 'condition') {
+                    // Loop again! Instantly evaluate this new condition node.
+                    currentId = targetNode.id;
+                } else {
+                    // We found a Task Node! Assign it and exit the loop.
+                    nextNodeId = targetNode.id;
+                    nextAssigneeId = targetNode.data?.assignee ? parseInt(targetNode.data.assignee, 10) : null;
+                    isFinalStep = false;
+                    break;
+                }
             }
         }
 
+        // --- Save the Route State ---
         if (isFinalStep) {
             await pool.query("UPDATE documents SET status = 'Approved', current_node_id = NULL, current_assignee_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1", [documentId]);
-            // NOTIFY STUDENT: Fully Approved
-            await sendNotificationEmail(doc.submitter_id, 'Document Fully Approved!', `Great news! Your document <b>"${doc.title}"</b> has passed all review stages and is fully approved.`);
+            await sendNotificationEmail(doc.submitter_id, 'Document Fully Approved!', `Great news! Your document <b>"${doc.title}"</b> has passed all review stages.`);
         } else {
             await pool.query("UPDATE documents SET current_node_id = $1, current_assignee_id = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3", [nextNodeId, nextAssigneeId, documentId]);
-            // NOTIFY STAFF: New file in queue
             if (nextAssigneeId) {
-                await sendNotificationEmail(nextAssigneeId, 'New Document Ready for Review', `A new document <b>"${doc.title}"</b> has been routed to your queue for review.`);
+                await sendNotificationEmail(nextAssigneeId, 'New Document Ready for Review', `A new document <b>"${doc.title}"</b> has been routed to your queue.`);
             }
         }
 
         const nodeLogLabel = doc.current_node_id || 'System';
         await pool.query("INSERT INTO approvals (document_id, approver_id, node_id, status, comments) VALUES ($1, $2, $3, 'Approved', $4)", [documentId, req.user.id, nodeLogLabel, comments || 'Verified by 2FA']);
 
-        const auditMessage = isFinalStep ? 'Document fully Approved via 2FA' : `Document Approved at Node ${doc.current_node_id} - Moved to Node ${nextNodeId}`;
+        const auditMessage = isFinalStep ? 'Document fully Approved via 2FA' : `Document Approved - Routed automatically to next step`;
         await pool.query("INSERT INTO audit_logs (document_id, user_id, action) VALUES ($1, $2, $3)", [documentId, req.user.id, auditMessage]);
 
         await pool.query('COMMIT');
         otpStore.delete(req.user.id);
         
-        res.status(200).json({ message: isFinalStep ? 'Document securely approved' : 'Document moved to next reviewer' });
+        res.status(200).json({ message: isFinalStep ? 'Document securely approved' : 'Document dynamically routed to next reviewer' });
     } catch (err) {
         await pool.query('ROLLBACK');
         console.error(err);

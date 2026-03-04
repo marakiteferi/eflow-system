@@ -2,114 +2,93 @@ import React, { useState, useEffect } from 'react';
 import api from '../api';
 
 const DocumentUpload = ({ onUploadSuccess }) => {
-  const [file, setFile] = useState(null);
   const [title, setTitle] = useState('');
-  const [workflowId, setWorkflowId] = useState('');
-  const [workflows, setWorkflows] = useState([]); 
-  const [isUploading, setIsUploading] = useState(false);
+  const [file, setFile] = useState(null);
+  const [tag, setTag] = useState(''); // NEW: Tag state
+  const [workflows, setWorkflows] = useState([]);
+  const [selectedWorkflow, setSelectedWorkflow] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [message, setMessage] = useState({ type: '', text: '' });
 
-  // Fetch available workflows when component loads
   useEffect(() => {
     const fetchWorkflows = async () => {
       try {
-        const response = await api.get('/workflows');
-        setWorkflows(response.data);
-        if (response.data.length > 0) {
-          setWorkflowId(response.data[0].id); // Default to the first workflow
-        }
-      } catch (error) {
-        console.error('Error fetching workflows:', error);
+        const res = await api.get('/workflows');
+        setWorkflows(res.data);
+      } catch (err) {
+        console.error('Failed to load workflows', err);
       }
     };
     fetchWorkflows();
   }, []);
 
-  const handleFileChange = (e) => {
-    setFile(e.target.files[0]);
-  };
+  const handleFileChange = (e) => setFile(e.target.files[0]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!file || !title) {
-      alert('Please provide a title and select a file.');
-      return;
-    }
-    if (workflows.length > 0 && !workflowId) {
-      alert('Please select a workflow.');
-      return;
-    }
+    if (!file || !title) return setMessage({ type: 'error', text: 'Title and document are required.' });
+
+    setIsLoading(true);
+    setMessage({ type: '', text: '' });
 
     const formData = new FormData();
-    formData.append('document', file);
     formData.append('title', title);
-    if (workflowId) formData.append('workflow_id', workflowId);
-
-    setIsUploading(true);
+    formData.append('document', file);
+    formData.append('metadata_tag', tag); // NEW: Send tag to backend
+    if (selectedWorkflow) formData.append('workflow_id', selectedWorkflow);
 
     try {
       await api.post('/documents/upload', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
-      alert('Document uploaded successfully!');
-      setFile(null);
-      setTitle('');
-      onUploadSuccess();
+      setMessage({ type: 'success', text: 'Document submitted successfully!' });
+      setTitle(''); setFile(null); setTag(''); setSelectedWorkflow('');
+      if (onUploadSuccess) onUploadSuccess();
     } catch (error) {
-      console.error('Error uploading document:', error);
-      alert('Failed to upload document.');
+      setMessage({ type: 'error', text: error.response?.data?.message || 'Error uploading document.' });
     } finally {
-      setIsUploading(false);
+      setIsLoading(false);
     }
   };
 
   return (
     <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
-      <h3 className="text-xl font-semibold mb-4">Submit New Document</h3>
+      <h3 className="text-xl font-semibold mb-4 text-gray-800">Submit New Document</h3>
+      
+      {message.text && (
+        <div className={`p-3 rounded mb-4 text-sm font-medium ${message.type === 'error' ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
+          {message.text}
+        </div>
+      )}
+
       <form onSubmit={handleSubmit} className="space-y-4">
-        
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">Document Title</label>
-          <input 
-            type="text" 
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
-            placeholder="e.g., Registration Form"
-          />
+          <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-indigo-500" placeholder="e.g. Leave Request Form" required />
         </div>
-
-        {/* The Missing Dropdown Menu */}
-        {workflows.length > 0 && (
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Select Workflow</label>
-            <select 
-              value={workflowId}
-              onChange={(e) => setWorkflowId(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 bg-white"
-            >
-              {workflows.map((wf) => (
-                <option key={wf.id} value={wf.id}>{wf.name}</option>
-              ))}
-            </select>
-          </div>
-        )}
+        
+        {/* NEW: Tag Input */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Metadata Tag (Optional)</label>
+          <input type="text" value={tag} onChange={(e) => setTag(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-amber-500" placeholder="e.g. Urgent, Finance, Scholarship" />
+          <p className="text-xs text-gray-500 mt-1">Tags are used by automated routing rules to direct your file.</p>
+        </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Upload File (Image)</label>
-          <input 
-            type="file" 
-            accept="image/*,.pdf"
-            onChange={handleFileChange}
-            className="w-full px-3 py-2 border border-gray-300 rounded-md file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
-          />
+          <label className="block text-sm font-medium text-gray-700 mb-1">Upload File (Image or PDF)</label>
+          <input type="file" accept="image/*,.pdf" onChange={handleFileChange} className="w-full px-3 py-2 border border-gray-300 rounded-md file:mr-4 file:bg-indigo-50 file:text-indigo-700 file:border-0 file:px-4 file:py-2 file:rounded hover:file:bg-indigo-100 cursor-pointer" />
         </div>
 
-        <button 
-          type="submit" 
-          disabled={isUploading}
-          className={`w-full py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white ${isUploading ? 'bg-indigo-400' : 'bg-indigo-600 hover:bg-indigo-700'} focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500`}
-        >
-          {isUploading ? 'Processing OCR...' : 'Submit Document'}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Select Workflow</label>
+          <select value={selectedWorkflow} onChange={(e) => setSelectedWorkflow(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-md bg-white">
+            <option value="">-- Select routing path --</option>
+            {workflows.map(wf => <option key={wf.id} value={wf.id}>{wf.name}</option>)}
+          </select>
+        </div>
+
+        <button type="submit" disabled={isLoading} className={`w-full text-white py-2 px-4 rounded-md font-bold shadow-sm transition-colors ${isLoading ? 'bg-indigo-400' : 'bg-indigo-600 hover:bg-indigo-700'}`}>
+          {isLoading ? 'Processing OCR & Saving...' : 'Submit Document'}
         </button>
       </form>
     </div>

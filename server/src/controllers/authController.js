@@ -44,38 +44,56 @@ const loginUser = async (req, res) => {
     try {
         const { email, password } = req.body;
 
-        // Find user
-        const user = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-        if (user.rows.length === 0) {
+        // Fetch user AND their dynamic role permissions in one query
+        const userQuery = await pool.query(`
+            SELECT u.*, 
+                   COALESCE(r.can_create_workflows, false) as can_create_workflows,
+                   COALESCE(r.can_manage_users, false) as can_manage_users,
+                   COALESCE(r.requires_workflow_approval, false) as requires_workflow_approval
+            FROM users u
+            LEFT JOIN dynamic_roles r ON u.role_id = r.id
+            WHERE u.email = $1
+        `, [email]);
+
+        if (userQuery.rows.length === 0) {
             return res.status(400).json({ message: 'Invalid credentials' });
         }
 
+        const user = userQuery.rows[0];
+
         // Check password
-        const validPassword = await bcrypt.compare(password, user.rows[0].password_hash);
+        const validPassword = await bcrypt.compare(password, user.password_hash);
         if (!validPassword) {
             return res.status(400).json({ message: 'Invalid credentials' });
         }
 
         // Generate JWT
         const token = jwt.sign(
-            { id: user.rows[0].id, role_id: user.rows[0].role_id },
+            { id: user.id, role_id: user.role_id },
             process.env.JWT_SECRET,
-            { expiresIn: '1h' }
+            { expiresIn: '8h' }
         );
 
-        // NEW: Log the successful login to the audit trail
         await pool.query(
             "INSERT INTO audit_logs (user_id, action) VALUES ($1, 'User logged into the system')", 
-            [user.rows[0].id]
+            [user.id]
         );
 
+        // Package up the legacy roles + new dynamic permissions
+        const isSuperAdmin = user.role_id === 3;
+        
         res.status(200).json({ 
             token, 
             user: { 
-                id: user.rows[0].id, 
-                name: user.rows[0].name, 
-                email: user.rows[0].email,
-                role_id: user.rows[0].role_id 
+                id: user.id, 
+                name: user.name, 
+                email: user.email,
+                role_id: user.role_id,
+                department_id: user.department_id,
+                // If they are legacy Admin (3), they get everything. Otherwise, use their dynamic role settings.
+                can_create_workflows: isSuperAdmin ? true : user.can_create_workflows,
+                can_manage_users: isSuperAdmin ? true : user.can_manage_users,
+                requires_workflow_approval: isSuperAdmin ? false : user.requires_workflow_approval
             } 
         });
     } catch (error) {
@@ -83,5 +101,4 @@ const loginUser = async (req, res) => {
         res.status(500).json({ message: 'Server error during login' });
     }
 };
-
 module.exports = { registerUser, loginUser };
